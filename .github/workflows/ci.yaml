@@ -15,7 +15,7 @@ jobs:
       tag: ${{ steps.read.outputs.tag }}
       sha: ${{ steps.read.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - id: read
         env:
           REF_TYPE: ${{ github.ref_type }}
