@@ -1,0 +1,123 @@
+name: Build & Release Packages
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Apache Kvrocks version to build (without v prefix). Must match X.Y.Z.
+        required: true
+        type: string
+      iteration:
+        description: Package iteration / revision (positive integer).
+        required: true
+        type: string
+      tag:
+        description: Tag name for the GitHub Release.
+        required: true
+        type: string
+      ref:
+        description: Git ref (commit SHA preferred) to checkout and tag the release at.
+        required: false
+        type: string
+        default: ''
+
+env:
+  DEB_FPM_OPTS: >-
+    --prefix '/usr'
+    --config-files /usr/share/kvrocks/kvrocks.conf
+  COMMON_FPM_OPTS: >-
+    -s dir -n kvrocks --verbose -a native
+    --description 'A distributed key value NoSQL database that uses RocksDB as storage engine and is compatible with Redis protocol'
+    --url 'https://kvrocks.apache.org' --license 'Apache-2.0'
+
+jobs:
+  release-packages:
+    name: Release DEB & RPM Package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      KVROCKS_VERSION: ${{ inputs.version }}
+      PKG_ITERATION: ${{ inputs.iteration }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Validate inputs
+        run: |
+          set -e
+          if ! printf '%s' "$KVROCKS_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version: '$KVROCKS_VERSION'. Expected X.Y.Z."
+            exit 1
+          fi
+          if ! printf '%s' "$PKG_ITERATION" | grep -Eq '^[0-9]+$'; then
+            echo "::error::Invalid iteration: '$PKG_ITERATION'. Expected a positive integer."
+            exit 1
+          fi
+          if ! printf '%s' "$RELEASE_TAG" | grep -Eq '^[A-Za-z0-9._+-]+$'; then
+            echo "::error::Invalid tag: '$RELEASE_TAG'."
+            exit 1
+          fi
+
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 64
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git build-essential cmake libtool python3
+
+      - name: Build Apache Kvrocks
+        run: |
+          set -e
+          git clone -b "v${KVROCKS_VERSION}" https://github.com/apache/kvrocks
+          cd kvrocks
+          ./x.py build -DPORTABLE=1 -DCMAKE_BUILD_TYPE=Release -j "$(nproc)"
+
+      - name: Make DEB release directory
+        run: |
+          mkdir release
+          mkdir release/bin release/share
+          mkdir release/share/kvrocks
+          cp kvrocks/build/kvrocks release/bin/
+          cp kvrocks/build/kvrocks2redis release/bin/
+          cp kvrocks/kvrocks.conf release/share/kvrocks
+          cp -r kvrocks/LICENSE kvrocks/NOTICE kvrocks/licenses release/share/kvrocks
+          cp kvrocks/utils/systemd/kvrocks.service release/share/kvrocks
+
+      - name: Package DEB
+        uses: bpicode/github-action-fpm@9311f0eb43a89d59b4e6a17ed7e8bd8d3aa7eecd # v0.9.3
+        with:
+          fpm_args: '.'
+          fpm_opts: '-t deb -v ${{ env.KVROCKS_VERSION }} --iteration ${{ env.PKG_ITERATION }} -C release ${{ env.COMMON_FPM_OPTS }} ${{ env.DEB_FPM_OPTS }}'
+
+      - name: Make RPM release directory
+        run: |
+          mkdir -p rpm-release/etc/kvrocks
+          mkdir -p rpm-release/usr/bin
+          mkdir -p rpm-release/usr/lib/systemd/system
+          mkdir -p rpm-release/usr/share/licenses/kvrocks
+
+          cp kvrocks/build/kvrocks rpm-release/usr/bin/
+          cp kvrocks/build/kvrocks2redis rpm-release/usr/bin/
+          cp kvrocks/kvrocks.conf rpm-release/etc/kvrocks/
+          cp -r kvrocks/LICENSE kvrocks/NOTICE kvrocks/licenses/* rpm-release/usr/share/licenses/kvrocks/
+          cp kvrocks/utils/systemd/kvrocks.service rpm-release/usr/lib/systemd/system/
+
+      - name: Package RPM
+        uses: bpicode/github-action-fpm@9311f0eb43a89d59b4e6a17ed7e8bd8d3aa7eecd # v0.9.3
+        with:
+          fpm_args: '.'
+          fpm_opts: '-t rpm -v ${{ env.KVROCKS_VERSION }} --iteration ${{ env.PKG_ITERATION }} -C rpm-release ${{ env.COMMON_FPM_OPTS }}'
+
+      - name: Release
+        uses: softprops/action-gh-release@69320dbe05506a9a39fc8ae11030b214ec2d1f87 # v2.0.5
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ inputs.ref || github.sha }}
+          name: ${{ env.KVROCKS_VERSION }}-${{ env.PKG_ITERATION }}
+          files: |
+            ./*.deb
+            ./*.rpm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

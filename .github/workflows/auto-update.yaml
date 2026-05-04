@@ -1,0 +1,108 @@
+name: Auto-update Apache Kvrocks
+
+on:
+  schedule:
+    # Every day at 04:17 UTC
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: 'Force-build a specific kvrocks version (without v prefix). Skips upstream check & VERSION file change.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  decide:
+    name: Check upstream release & decide
+    runs-on: ubuntu-22.04
+    outputs:
+      should_build: ${{ steps.decide.outputs.should_build }}
+      version: ${{ steps.decide.outputs.version }}
+      iteration: ${{ steps.decide.outputs.iteration }}
+      tag: ${{ steps.decide.outputs.tag }}
+      sha: ${{ steps.decide.outputs.sha }}
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_VERSION: ${{ inputs.force_version }}
+        run: |
+          set -e
+
+          validate_version() {
+            local v="$1"
+            if ! printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::Invalid version: '$v'. Expected X.Y.Z."
+              exit 1
+            fi
+          }
+
+          # Force-rebuild path: build the specified version as-is, no VERSION/ITERATION change.
+          if [ -n "$FORCE_VERSION" ]; then
+            validate_version "$FORCE_VERSION"
+            echo "Force-building kvrocks v${FORCE_VERSION}"
+            CURRENT_ITERATION=$(cat ITERATION | tr -d '[:space:]')
+            SHA=$(git rev-parse HEAD)
+            echo "should_build=true"   >> "$GITHUB_OUTPUT"
+            echo "version=${FORCE_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "iteration=${CURRENT_ITERATION}" >> "$GITHUB_OUTPUT"
+            echo "tag=${FORCE_VERSION}-${CURRENT_ITERATION}-manual-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+            echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Auto-bump path: read latest upstream and compare.
+          TARGET=$(gh release view --repo apache/kvrocks --json tagName --jq '.tagName' | sed 's/^v//')
+          validate_version "$TARGET"
+
+          CURRENT=$(cat VERSION | tr -d '[:space:]')
+          echo "Current: $CURRENT  /  Upstream latest: $TARGET"
+
+          if [ "$CURRENT" = "$TARGET" ]; then
+            echo "Already up to date. Skipping build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          NEWEST=$(printf '%s\n%s\n' "$CURRENT" "$TARGET" | sort -V | tail -n1)
+          if [ "$NEWEST" != "$TARGET" ]; then
+            echo "Local VERSION ($CURRENT) is newer than upstream ($TARGET). Skipping."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Bump VERSION and ITERATION, commit, push.
+          echo "$TARGET" > VERSION
+          echo "1"      > ITERATION
+
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add VERSION ITERATION
+          git commit -m "Auto-bump kvrocks to ${TARGET}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+          SHA=$(git rev-parse HEAD)
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+          echo "version=${TARGET}" >> "$GITHUB_OUTPUT"
+          echo "iteration=1" >> "$GITHUB_OUTPUT"
+          echo "tag=${TARGET}-1" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: decide
+    if: needs.decide.outputs.should_build == 'true'
+    uses: ./.github/workflows/_build.yaml
+    with:
+      version: ${{ needs.decide.outputs.version }}
+      iteration: ${{ needs.decide.outputs.iteration }}
+      tag: ${{ needs.decide.outputs.tag }}
+      ref: ${{ needs.decide.outputs.sha }}
+    permissions:
+      contents: write

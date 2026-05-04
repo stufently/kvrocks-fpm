@@ -1,87 +1,47 @@
-name: Release
+name: Release on tag
 
 on:
   workflow_dispatch:
   push:
     tags:
-      - 2.**
-
-env:
-  DEB_FPM_OPTS: >-
-    --prefix '/usr'
-    --config-files /usr/share/kvrocks/kvrocks.conf
-  COMMON_FPM_OPTS: >-
-    -s dir -n kvrocks --verbose -a native
-    --description 'A distributed key value NoSQL database that uses RocksDB as storage engine and is compatible with Redis protocol'
-    --url 'https://kvrocks.apache.org' --license 'Apache-2.0'
+      - '2.*'
 
 jobs:
-  release-packages:
-    name: Release DEB & RPM Package
+  read-version:
     runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      iteration: ${{ steps.read.outputs.iteration }}
+      tag: ${{ steps.read.outputs.tag }}
+      sha: ${{ steps.read.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4.0.0
-        with:
-          fetch-depth: 64
-
-      - name: Install Dependencies
-        run: |
-          sudo apt-get install -y git build-essential cmake libtool python3
-
-      - name: Set env variables
-        run: |
-          echo "VERSION=$(cat VERSION)" >> $GITHUB_ENV
-          echo "ITERATION=$(cat ITERATION)" >> $GITHUB_ENV
-
-      - name: Build
-        run: |
-          git clone -b v$VERSION https://github.com/apache/kvrocks
-          cd kvrocks
-          ./x.py build -DPORTABLE=1 -DCMAKE_BUILD_TYPE=Release -j $(nproc)
-      
-      - name: Make DEB release directory
-        run: |
-          mkdir release
-          mkdir release/bin release/share
-          mkdir release/share/kvrocks
-          cp kvrocks/build/kvrocks release/bin/
-          cp kvrocks/build/kvrocks2redis release/bin/
-          cp kvrocks/kvrocks.conf release/share/kvrocks
-          cp -r kvrocks/LICENSE kvrocks/NOTICE kvrocks/licenses release/share/kvrocks
-          cp kvrocks/utils/systemd/kvrocks.service release/share/kvrocks
-
-      - name: Package DEB
-        uses: bpicode/github-action-fpm@v0.9.3
-        with:
-          fpm_args: '.'
-          fpm_opts: '-t deb -v ${{ env.VERSION }} --iteration ${{ env.ITERATION }} -C release ${{ env.COMMON_FPM_OPTS }} ${{ env.DEB_FPM_OPTS }}'
-      
-      - name: Make RPM release directory
-        run: |
-          mkdir -p rpm-release/etc/kvrocks
-          mkdir -p rpm-release/usr/bin
-          mkdir -p rpm-release/usr/lib/systemd/system
-          mkdir -p rpm-release/usr/share/licenses/kvrocks
-
-          cp kvrocks/build/kvrocks rpm-release/usr/bin/
-          cp kvrocks/build/kvrocks2redis rpm-release/usr/bin/
-          cp kvrocks/kvrocks.conf rpm-release/etc/kvrocks/
-          cp -r kvrocks/LICENSE kvrocks/NOTICE kvrocks/licenses/* rpm-release/usr/share/licenses/kvrocks/
-          cp kvrocks/utils/systemd/kvrocks.service rpm-release/usr/lib/systemd/system/
-
-      - name: Package RPM
-        uses: bpicode/github-action-fpm@v0.9.3
-        with:
-          fpm_args: '.'
-          fpm_opts: '-t rpm -v ${{ env.VERSION }} --iteration ${{ env.ITERATION }} -C rpm-release ${{ env.COMMON_FPM_OPTS }}'
-
-      - name: Release
-        uses: softprops/action-gh-release@v2.0.6
-        with:
-          name: |
-            ${{ env.VERSION }}-${{ env.ITERATION }}
-          files: |
-            ./*.deb
-            ./*.rpm
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - id: read
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -e
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          ITERATION=$(cat ITERATION | tr -d '[:space:]')
+          if [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+          else
+            TAG="${VERSION}-${ITERATION}"
+          fi
+          SHA=$(git rev-parse HEAD)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "iteration=${ITERATION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: read-version
+    uses: ./.github/workflows/_build.yaml
+    with:
+      version: ${{ needs.read-version.outputs.version }}
+      iteration: ${{ needs.read-version.outputs.iteration }}
+      tag: ${{ needs.read-version.outputs.tag }}
+      ref: ${{ needs.read-version.outputs.sha }}
+    permissions:
+      contents: write
